@@ -133,23 +133,20 @@ public abstract class TimeColumn
             final TimeValue time = entry.getKey();
             final AbstractTimeInter[] vector = entry.getValue();
 
-            // Check that this time is present in all standard staves
+            // Check that this time is present in enough standard staves
             // and compute the time mean grade
             double mean = 0;
             int count = 0;
+            int standards = 0;
 
             final List<Staff> staves = system.getStaves();
             for (int idx = 0; idx < staves.size(); idx++) {
                 final Staff staff = staves.get(idx);
                 if (!staff.isTablature()) {
+                    standards++;
                     final Inter inter = vector[idx];
                     if (inter == null) {
-                        logger.debug(
-                                "System#{} TimeValue {} not found in all standard staves",
-                                system.getId(),
-                                time);
-
-                        continue TimeLoop;
+                        continue;
                     }
 
                     mean += inter.getGrade(); // TODO: use contextual?????
@@ -157,7 +154,25 @@ public abstract class TimeColumn
                 }
             }
 
+            if (count == 0) {
+                continue TimeLoop;
+            }
+
             mean /= count;
+
+            // A value seen in too few staves is accepted only if it is a good reading on its own
+            if ((count < minStaffCount(standards)) && (mean < minLoneGrade())) {
+                logger.debug(
+                        "System#{} TimeValue {} found in only {}/{} standard staves, grade {}",
+                        system.getId(),
+                        time,
+                        count,
+                        standards,
+                        mean);
+
+                continue TimeLoop;
+            }
+
             grades.put(time, mean);
         }
 
@@ -183,12 +198,30 @@ public abstract class TimeColumn
         final AbstractTimeInter[] bestVector = vectors.get(timeValue);
         final List<Staff> staves = system.getStaves();
 
+        // A model to copy into the staves that have no candidate of their own
+        AbstractTimeInter model = null;
+
+        if (replicateMissing()) {
+            for (AbstractTimeInter t : bestVector) {
+                if ((t != null) && !(t instanceof TimePairInter) && (t.getBounds() != null)) {
+                    model = t;
+                    break;
+                }
+            }
+        }
+
         for (int is = 0; is < staves.size(); is++) {
             final Staff staff = staves.get(is);
 
             if (!staff.isTablature()) {
                 TimeBuilder builder = builders.get(staff);
-                builder.createTimeSig(bestVector[is]);
+                AbstractTimeInter best = bestVector[is];
+
+                if ((best == null) && (model != null)) {
+                    best = replicateTo(model, staff);
+                }
+
+                builder.createTimeSig(best);
                 builder.discardOthers();
             }
         }
@@ -203,6 +236,119 @@ public abstract class TimeColumn
      * so that all related data inserted in sig is removed.
      */
     protected abstract void cleanup ();
+
+    //---------------//
+    // minStaffCount //
+    //---------------//
+    /**
+     * Report the minimum number of standard staves that must exhibit the same time value
+     * for the column to be accepted.
+     * <p>
+     * Default is "all of them", which is what a system header column can guarantee since
+     * every staff header is explicitly searched for a time signature.
+     *
+     * @param standards the number of standard (non tablature) staves in system
+     * @return the minimum count of staves sharing the same time value
+     */
+    protected int minStaffCount (int standards)
+    {
+        return standards;
+    }
+
+    //-------------------//
+    // minBuilderCount //
+    //-------------------//
+    /**
+     * Report the minimum number of staves that must yield at least one candidate for the
+     * column retrieval to go on at all.
+     * <p>
+     * Default is "all of them", as in a system header.
+     *
+     * @param standards the number of standard staves in system
+     * @return the minimum count of staves with a candidate
+     */
+    protected int minBuilderCount (int standards)
+    {
+        return standards;
+    }
+
+    //---------------//
+    // minLoneGrade //
+    //---------------//
+    /**
+     * Report the minimum mean grade that lets a time value be accepted although it was found
+     * in fewer staves than {@link #minStaffCount(int)}.
+     * <p>
+     * Default is unreachable, i.e. no such exception.
+     *
+     * @return the minimum mean grade
+     */
+    protected double minLoneGrade ()
+    {
+        return Double.MAX_VALUE;
+    }
+
+    //-------------------//
+    // cleanupOnFailure //
+    //-------------------//
+    /**
+     * Called when the column was built but not validated by {@link #checkConsistency()}.
+     * <p>
+     * Default is to keep the candidates in the SIG, as the header path does.
+     */
+    protected void cleanupOnFailure ()
+    {
+        // Void by default
+    }
+
+    //-------------------//
+    // replicateMissing //
+    //-------------------//
+    /**
+     * Report whether the winning time value should be copied into the staves of the system
+     * that have no candidate of their own.
+     * <p>
+     * A time signature applies to the whole system, so a value accepted for the column must be
+     * recorded in every staff: the exporter writes &lt;time&gt; per part, and the rhythm engine
+     * derives the stack expected duration from the stack as a whole. Leaving a staff without it
+     * makes that part's measure be truncated against a duration it never declared.
+     * <p>
+     * Not needed inside a system header, where every staff is searched explicitly.
+     *
+     * @return true to replicate
+     */
+    protected boolean replicateMissing ()
+    {
+        return false;
+    }
+
+    //--------------//
+    // replicateTo //
+    //--------------//
+    /**
+     * Create, in the provided staff, a copy of the provided time inter, vertically shifted to
+     * that staff.
+     *
+     * @param model the time inter to copy
+     * @param staff the target staff
+     * @return the created copy, already added to the SIG
+     */
+    private AbstractTimeInter replicateTo (AbstractTimeInter model,
+                                           Staff staff)
+    {
+        final AbstractTimeInter replica = model.replicate(staff);
+        final Rectangle box = model.getBounds();
+        final double x = box.getCenterX();
+        final double dy = staff.getFirstLine().yAt(x) - model.getStaff().getFirstLine().yAt(x);
+        final Rectangle target = new Rectangle(box);
+        target.y += (int) Math.rint(dy);
+        replica.setBounds(target);
+
+        system.getSig().addVertex(replica);
+        logger.debug("System#{} replicated {} into staff#{}", system.getId(), model, staff.getId());
+
+        return replica;
+    }
 
     //------------------//
     // discardNeighbors //
@@ -255,7 +401,11 @@ public abstract class TimeColumn
         Map<Staff, AbstractTimeInter> times = new TreeMap<>(Staff.byId);
 
         for (Map.Entry<Staff, TimeBuilder> entry : builders.entrySet()) {
-            times.put(entry.getKey(), entry.getValue().getTimeInter());
+            final AbstractTimeInter timeInter = entry.getValue().getTimeInter();
+
+            if (timeInter != null) {
+                times.put(entry.getKey(), timeInter);
+            }
         }
 
         return times;
@@ -356,16 +506,25 @@ public abstract class TimeColumn
         }
 
         // Process each staff on turn, to find candidates
+        int okCount = 0;
+        int standards = 0;
+
         for (TimeBuilder builder : builders.values()) {
+            standards++;
+
             // Retrieve candidates for time items
             builder.findCandidates();
 
             // This fails if no candidate at all is kept in staff after filtering
-            if (!builder.filterCandidates()) {
-                cleanup(); // Clean up what has been constructed
-
-                return -1; // We failed to find a time sig in stack
+            if (builder.filterCandidates()) {
+                okCount++;
             }
+        }
+
+        if (okCount < minBuilderCount(standards)) {
+            cleanup(); // Clean up what has been constructed
+
+            return -1; // We failed to find a time sig in stack
         }
 
         // Check vertical alignment
@@ -377,6 +536,8 @@ public abstract class TimeColumn
 
             return 0;
         }
+
+        cleanupOnFailure();
 
         return -1; // Failed
     }

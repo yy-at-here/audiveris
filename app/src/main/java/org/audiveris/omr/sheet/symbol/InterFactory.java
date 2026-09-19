@@ -105,6 +105,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -708,6 +709,46 @@ public class InterFactory
 
         systemTimes.removeAll(headerTimes);
 
+        // Seed TimeNumberInter candidates from the general-purpose NumberInter instances.
+        // Outside of a system header, a TIME_TWO..TIME_SIXTEEN glyph is created as a plain
+        // NumberInter (see doCreate) and NumberInter.searchLinks can only pair a number with an
+        // *already existing* TimeNumberInter. As only HeaderTimeBuilder ever creates one, a
+        // numeric time signature standing further down the system could never be assembled.
+        // So we promote here every number that sits inside a staff at a plausible time pitch,
+        // and let the time column below validate or discard the candidates.
+        final Map<Inter, Inter> promoted = new LinkedHashMap<>(); // timeNumber -> source number
+
+        for (Inter inter : sig.inters(NumberInter.class)) {
+            final NumberInter number = (NumberInter) inter;
+            final Staff staff = number.getStaff();
+            final Glyph glyph = number.getGlyph();
+
+            if ((staff == null) || (glyph == null) || staff.isTablature()) {
+                continue;
+            }
+
+            if (number.getCenter().x < staff.getHeaderStop()) {
+                continue;
+            }
+
+            if (!staff.contains(number.getCenter())) {
+                continue; // Likely a measure count, handled by SymbolsLinker
+            }
+
+            final TimeNumberInter tn = TimeNumberInter.create(
+                    glyph,
+                    number.getShape(),
+                    number.getGrade(),
+                    staff);
+
+            if (tn != null) {
+                sig.addVertex(tn);
+                promoted.put(tn, number);
+                systemTimes.add(tn);
+                logger.debug("TIMEDBG promoted {} from {} staff#{}", tn, number, staff.getId());
+            }
+        }
+
         if (systemTimes.isEmpty()) {
             return;
         }
@@ -736,6 +777,22 @@ public class InterFactory
             final MeasureStack stack = entry.getKey();
             final TimeColumn column = new BasicTimeColumn(stack, entry.getValue());
             final int res = column.retrieveTime();
+            logger.debug(
+                    "TIMEDBG system#{} stack#{} candidates={} res={}",
+                    system.getId(),
+                    stack.getIdValue(),
+                    entry.getValue(),
+                    res);
+
+            if (res == -1) {
+                // Column was not validated: drop the candidates we seeded for this stack,
+                // together with any TimePairInter that getValueVectors() may have built on them
+                for (Inter inter : entry.getValue()) {
+                    if (promoted.containsKey(inter) && !inter.isRemoved()) {
+                        discardCandidate(inter);
+                    }
+                }
+            }
 
             // If the stack does have a validated time sig, discard overlapping stuff right now!
             if (res != -1) {
@@ -763,6 +820,47 @@ public class InterFactory
                     }
                 }
             }
+        }
+
+        // Reconcile the promoted candidates with their source numbers
+        for (Entry<Inter, Inter> e : promoted.entrySet()) {
+            final Inter timeNumber = e.getKey();
+            final Inter number = e.getValue();
+
+            if (timeNumber.isRemoved()) {
+                continue; // Source number survives, SymbolsLinker will deal with it
+            }
+
+            if (timeNumber.getEnsemble() != null) {
+                // Validated as part of a time pair: the source number is now redundant
+                if (!number.isRemoved()) {
+                    number.remove();
+                }
+            } else {
+                // Orphan candidate (no stack found, or column silently failed)
+                discardCandidate(timeNumber);
+            }
+        }
+    }
+
+    //------------------//
+    // discardCandidate //
+    //------------------//
+    /**
+     * Remove a rejected time-number candidate, together with any ensemble built on it.
+     *
+     * @param candidate the candidate to remove
+     */
+    private void discardCandidate (Inter candidate)
+    {
+        for (Inter ensemble : candidate.getAllEnsembles()) {
+            if (!ensemble.isRemoved()) {
+                ensemble.remove();
+            }
+        }
+
+        if (!candidate.isRemoved()) {
+            candidate.remove();
         }
     }
 

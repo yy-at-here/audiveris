@@ -1,6 +1,8 @@
 // </editor-fold>
 package org.audiveris.omr.sheet.time;
 
+import org.audiveris.omr.constant.Constant;
+import org.audiveris.omr.constant.ConstantSet;
 import org.audiveris.omr.sheet.Staff;
 import org.audiveris.omr.sheet.rhythm.MeasureStack;
 import org.audiveris.omr.sig.inter.Inter;
@@ -19,6 +21,10 @@ import java.util.Set;
 public class BasicTimeColumn
         extends TimeColumn
 {
+    //~ Static fields/initializers -----------------------------------------------------------------
+
+    private static final Constants constants = new Constants();
+
     //~ Instance fields ----------------------------------------------------------------------------
 
     /** The measure stack for which a column of times is checked. */
@@ -57,6 +63,97 @@ public class BasicTimeColumn
         for (Inter inter : timeSet) {
             inter.remove();
         }
+    }
+
+    //---------------//
+    // minStaffCount //
+    //---------------//
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Outside of a system header there is no dedicated per-staff search: candidates come from
+     * the generic symbol classification, which routinely misses one staff out of several
+     * (a digit swallowed by a note head, a rest interpretation winning on one staff...).
+     * Requiring every staff to agree makes the whole column collapse on such a miss, which is
+     * precisely when the vertical redundancy would be most useful.
+     * So here we only require a majority of the standard staves.
+     *
+     * @param standards the number of standard staves in system
+     * @return the minimum count of staves sharing the same time value
+     */
+    @Override
+    protected int minStaffCount (int standards)
+    {
+        if (standards <= 2) {
+            return standards;
+        }
+
+        return Math.max(2, (int) Math.ceil(standards * constants.minStaffRatio.getValue()));
+    }
+
+    //-------------------//
+    // minBuilderCount //
+    //-------------------//
+    /**
+     * {@inheritDoc}
+     * <p>
+     * A single staff with a candidate is enough to go on: whether that candidate is trustworthy
+     * is decided by {@link #checkConsistency()} together with {@link #minLoneGrade()}.
+     *
+     * @param standards the number of standard staves in system
+     * @return 1
+     */
+    @Override
+    protected int minBuilderCount (int standards)
+    {
+        return 1;
+    }
+
+    //---------------//
+    // minLoneGrade //
+    //---------------//
+    /**
+     * {@inheritDoc}
+     * <p>
+     * A well-graded time symbol standing in a single staff is still much better evidence than
+     * the note head or rest the same ink would otherwise be read as, so accept it.
+     *
+     * @return the minimum mean grade for an under-populated column
+     */
+    @Override
+    protected double minLoneGrade ()
+    {
+        return constants.minLoneGrade.getValue();
+    }
+
+    //-------------------//
+    // cleanupOnFailure //
+    //-------------------//
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Outside of a header, a rejected candidate must not be left in the SIG: PageRhythm
+     * collects every AbstractTimeInter of the system, so an orphan would silently become a
+     * real time signature.
+     */
+    @Override
+    protected void cleanupOnFailure ()
+    {
+        cleanup();
+    }
+
+    //-------------------//
+    // replicateMissing //
+    //-------------------//
+    /**
+     * {@inheritDoc}
+     *
+     * @return true
+     */
+    @Override
+    protected boolean replicateMissing ()
+    {
+        return true;
     }
 
     //----------------//
@@ -179,5 +276,24 @@ public class BasicTimeColumn
                 }
             }
         }
+    }
+
+    //~ Inner Classes ------------------------------------------------------------------------------
+
+    //-----------//
+    // Constants //
+    //-----------//
+    private static class Constants
+            extends ConstantSet
+    {
+        private final Constant.Ratio minStaffRatio = new Constant.Ratio(
+                0.5,
+                "Minimum ratio of system staves that must share the same time value"
+                        + " for a time signature column found outside a system header");
+
+        private final Constant.Ratio minLoneGrade = new Constant.Ratio(
+                0.4,
+                "Minimum grade for a time value found in fewer staves than required"
+                        + " (Grades.goodInterGrade)");
     }
 }

@@ -21,8 +21,11 @@
 // </editor-fold>
 package org.audiveris.omr.score;
 
+import org.audiveris.omr.constant.Constant;
+import org.audiveris.omr.constant.ConstantSet;
 import org.audiveris.omr.math.Rational;
 import org.audiveris.omr.sheet.PartBarline;
+import org.audiveris.omr.sheet.Scale;
 import org.audiveris.omr.sheet.SystemInfo;
 import org.audiveris.omr.sheet.rhythm.Measure;
 import org.audiveris.omr.sheet.rhythm.MeasureStack;
@@ -54,6 +57,8 @@ import java.util.List;
 public class MeasureFixer
 {
     //~ Static fields/initializers -----------------------------------------------------------------
+
+    private static final Constants constants = new Constants();
 
     private static final Logger logger = LoggerFactory.getLogger(MeasureFixer.class);
 
@@ -110,6 +115,31 @@ public class MeasureFixer
         }
 
         return termination;
+    }
+
+    //-------------//
+    // isCourtesy //
+    //-------------//
+    /**
+     * Check whether the provided stack is only the courtesy area at the right end of a
+     * system: a sliver of staff, past the last barline, which can hold a cautionary clef,
+     * key or time signature but no music.
+     *
+     * @param stack the stack to check
+     * @return true if so
+     */
+    private boolean isCourtesy (MeasureStack stack)
+    {
+        final SystemInfo system = stack.getSystem();
+
+        if (stack != system.getLastStack()) {
+            return false;
+        }
+
+        final Scale scale = system.getSheet().getScale();
+        final int maxWidth = scale.toPixels(constants.maxCourtesyWidth);
+
+        return (stack.getRight() - stack.getLeft()) <= maxWidth;
     }
 
     //---------//
@@ -250,7 +280,24 @@ public class MeasureFixer
             stack.resetSpecial();
 
             // Multiple measure rest in this stack?
-            final Integer multipleRestCount = stack.getMultipleMeasureCount(multipleRests);
+            Integer multipleRestCount = stack.getMultipleMeasureCount(multipleRests);
+
+            if ((multipleRestCount != null) && stackHasChords(stack)) {
+                // A multiple rest measure contains nothing else.
+                // A "multiple rest" sharing its measure with real chords is a beam that
+                // MultipleRestsBuilder mistook for a multi-rest bar (it runs at BEAMS time,
+                // when no measure is known yet, and only checks length, mid-line pitch and
+                // the presence of a vertical stroke on both sides).
+                final List<Inter> bogus = stackMultipleRests(stack, multipleRests);
+                logger.info(
+                        "Discarding {} multiple rest(s) in {}, measure is not empty",
+                        bogus.size(),
+                        stack);
+                bogus.forEach(inter -> inter.remove());
+                multipleRests.removeAll(bogus);
+                multipleRestCount = null;
+            }
+
             if (multipleRestCount != null) {
                 logger.debug("multiple measure rest: {}", multipleRestCount);
                 stack.setMultiRest();
@@ -271,8 +318,9 @@ public class MeasureFixer
                     stackTermination,
                     (stackTermination != null) ? ("=" + stackTermination) : "");
 
-            if (isEmpty(stack)) {
+            if (isEmpty(stack) || isCourtesy(stack)) {
                 // This whole stack is empty (no notes/rests, hence no voices)
+                // or it is just the courtesy sliver at the right end of the system
                 logger.debug("empty");
 
                 if (stack != system.getLastStack()) {
@@ -295,7 +343,10 @@ public class MeasureFixer
                 setId(
                         (lastId != null) ? (lastId + 1)
                                 : ((prevSystemLastId != null) ? (prevSystemLastId + 1) : 1));
-                lastId += (multipleRestCount - 1);
+
+                // A multiple rest spans at least one measure: an unknown count is reported as 0
+                // and must not push the running id backwards (which would duplicate a number)
+                lastId += Math.max(0, multipleRestCount - 1);
             } else if (isPickup(stack)) {
                 logger.debug("pickup");
                 stack.setPickup();
@@ -363,5 +414,64 @@ public class MeasureFixer
 
         // Side effect: remember the numeric value as last id
         lastId = id;
+    }
+
+    //---------------------//
+    // stackMultipleRests //
+    //---------------------//
+    /**
+     * Report the multiple rest inters whose center falls within the provided stack.
+     *
+     * @param stack         the stack to check
+     * @param multipleRests all multiple rests of the system
+     * @return the (possibly empty) list of multiple rests in stack
+     */
+    private List<Inter> stackMultipleRests (MeasureStack stack,
+                                            List<Inter> multipleRests)
+    {
+        final List<Inter> found = new ArrayList<>();
+
+        for (Inter inter : multipleRests) {
+            final int x = inter.getCenter().x;
+
+            if ((x >= stack.getLeft()) && (x <= stack.getRight())) {
+                found.add(inter);
+            }
+        }
+
+        return found;
+    }
+
+    //----------------//
+    // stackHasChords //
+    //----------------//
+    /**
+     * Report whether the provided stack contains at least one chord.
+     *
+     * @param stack the stack to check
+     * @return true if so
+     */
+    private boolean stackHasChords (MeasureStack stack)
+    {
+        for (Measure measure : stack.getMeasures()) {
+            if (!measure.getHeadChords().isEmpty() || !measure.getRestChords().isEmpty()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    //~ Inner Classes ------------------------------------------------------------------------------
+
+    //-----------//
+    // Constants //
+    //-----------//
+    private static class Constants
+            extends ConstantSet
+    {
+        private final Scale.Fraction maxCourtesyWidth = new Scale.Fraction(
+                6.0,
+                "Maximum width of the courtesy area at the right end of a system");
     }
 }
