@@ -22,11 +22,14 @@
 package org.audiveris.omr.sheet.symbol;
 
 import org.audiveris.omr.classifier.Evaluation;
+import org.audiveris.omr.constant.Constant;
+import org.audiveris.omr.constant.ConstantSet;
 import org.audiveris.omr.glyph.Glyph;
 import org.audiveris.omr.glyph.Grades;
 import org.audiveris.omr.glyph.Shape;
 import static org.audiveris.omr.glyph.Shape.BOW_DOWN;
 import static org.audiveris.omr.glyph.Shape.BOW_UP;
+import org.audiveris.omr.glyph.ShapeSet;
 import org.audiveris.omr.sheet.ProcessingSwitch;
 import org.audiveris.omr.sheet.ProcessingSwitches;
 import org.audiveris.omr.sheet.Sheet;
@@ -95,6 +98,9 @@ import org.audiveris.omr.sig.inter.TremoloInter;
 import org.audiveris.omr.sig.inter.TupletInter;
 import org.audiveris.omr.sig.inter.WedgeInter;
 import org.audiveris.omr.sig.inter.WordInter;
+import org.audiveris.omr.sig.relation.HeadStemRelation;
+import org.audiveris.omr.sig.relation.Relation;
+import org.audiveris.omr.sig.relation.SlurHeadRelation;
 import org.audiveris.omr.util.Navigable;
 
 import org.slf4j.Logger;
@@ -125,6 +131,8 @@ import java.util.TreeMap;
 public class InterFactory
 {
     //~ Static fields/initializers -----------------------------------------------------------------
+
+    private static final Constants constants = new Constants();
 
     private static final Logger logger = LoggerFactory.getLogger(InterFactory.class);
 
@@ -218,7 +226,135 @@ public class InterFactory
             sig.addVertex(inter);
         }
 
+        if ((inter instanceof ClefInter clefInter) && (glyph != null)) {
+            protectMidSystemClef(clefInter, eval, glyph);
+        }
+
         return inter;
+    }
+
+    //----------------------//
+    // protectMidSystemClef //
+    //----------------------//
+    /**
+     * Give a clef change printed inside a system the two things it needs to survive:
+     * the ink the HEADS step took from it, and a contextual grade above the generic floor.
+     * <p>
+     * A clef change printed inside a system is usually engraved at cue size, and the bowls of a
+     * cue-size C clef are then read as stem-less note heads by the HEADS step. Head and clef
+     * cover the very same ink, so {@link org.audiveris.omr.sig.SigReducer} puts them in mutual
+     * exclusion and keeps whichever has the higher contextual grade - which, for a cue-size
+     * clef, is regularly the head. Measured on a 600 dpi scan of a string quartet, a correct
+     * cue C clef graded 0.494 against two spurious WHOLE_NOTE heads graded 0.510 and 0.528:
+     * the clef lost the exclusion by 0.02 and the part stayed in the wrong clef, a fifth off,
+     * for the rest of the system.
+     * <p>
+     * A head which lies <b>wholly inside</b> the clef glyph, belongs to the stem-less family
+     * and carries <b>no stem and no slur or tie</b> has no evidence of its own: every pixel it
+     * claims is also claimed by the clef, and the clef is the reading the classifier is
+     * confident about. Such heads are removed, so that no exclusion is created at all.
+     * <p>
+     * A printed whole-note double stop is a different population and is not at risk: its heads
+     * are not inside anything the classifier reads as a clef. On the same four pages, the six
+     * printed whole-note double stops yield no clef evaluation whatsoever, their best clef
+     * grade being 0.030 - more than ten times below {@link Constants#minClefGrade}.
+     *
+     * @param clef  the clef candidate just created
+     * @param eval  the evaluation it comes from
+     * @param glyph the underlying glyph
+     */
+    private void protectMidSystemClef (ClefInter clef,
+                                       Evaluation eval,
+                                       Glyph glyph)
+    {
+        if (!constants.protectMidSystemClef.isSet()) {
+            return;
+        }
+
+        final Staff staff = clef.getStaff();
+
+        if ((staff == null) || staff.isTablature()) {
+            return;
+        }
+
+        // Beyond the system header only: a header clef is ClefBuilder's business
+        if (glyph.getCenter2D().getX() <= system.getHeaderStop()) {
+            return;
+        }
+
+        // The classifier must be confident that this ink is a clef
+        if (eval.grade < constants.minClefGrade.getValue()) {
+            return;
+        }
+
+        // Plausible size for a clef, from cue-size C up to full-size G
+        final int interline = staff.getSpecificInterline();
+        final double normHeight = glyph.getHeight() / (double) interline;
+        final double normWidth = glyph.getWidth() / (double) interline;
+
+        if ((normHeight < constants.minClefHeight.getValue()) //
+                || (normHeight > constants.maxClefHeight.getValue()) //
+                || (normWidth < constants.minClefWidth.getValue()) //
+                || (normWidth > constants.maxClefWidth.getValue())) {
+            return;
+        }
+
+        // A C clef is symmetric about its reference line, so its center must sit on a line
+        if (clef.getShape() == Shape.C_CLEF) {
+            final Double pp = system.estimatedPitch(glyph.getCenter2D());
+
+            if (pp == null) {
+                return;
+            }
+
+            if (Math.abs(pp - (2 * Math.rint(pp / 2))) > constants.maxLinePitchOffset.getValue()) {
+                return;
+            }
+        }
+
+        // Gather the heads wholly inside the clef.
+        // If any of them has evidence of its own, the ink is contested: leave the conflict
+        // to SigReducer rather than deciding it here.
+        final Rectangle box = glyph.getBounds();
+        final List<Inter> victims = new ArrayList<>();
+
+        for (Inter head : sig.inters(HeadInter.class)) {
+            if (head.isRemoved() || !box.contains(head.getBounds())) {
+                continue;
+            }
+
+            if (!ShapeSet.StemLessHeads.contains(head.getShape())) {
+                return;
+            }
+
+            for (Relation rel : sig.edgesOf(head)) {
+                if ((rel instanceof HeadStemRelation) || (rel instanceof SlurHeadRelation)) {
+                    return;
+                }
+            }
+
+            victims.add(head);
+        }
+
+        for (Inter victim : victims) {
+            logger.info("Clef {} claims the ink of {}", clef, victim);
+            victim.remove();
+        }
+
+        // Second half of the problem, and the one that actually decides the outcome.
+        // A clef owns no relation that could raise its contextual grade - unlike a head (its
+        // stem), an alter (its head) or a time number (its pair) - so it keeps the modest
+        // intrinsic grade the classifier gave it, and SIGraph.deleteWeakInters removes every
+        // inter below Grades.minContextualGrade (0.5). A cue-size clef is therefore deleted on
+        // grade alone, whatever happens with the heads: measured on the same scan, the page-2
+        // cue tenor clef enters the SIG at 0.518 and survives, the page-3 one enters at 0.395
+        // and is purged. A candidate that has passed every gate above is lifted to that floor.
+        final Double grade = clef.getGrade();
+
+        if ((grade != null) && (grade < Grades.minContextualGrade)) {
+            logger.info("Clef {} lifted from {} to the weak-inter floor", clef, grade);
+            clef.setGrade(Grades.minContextualGrade);
+        }
     }
 
     //----------//
@@ -1298,5 +1434,42 @@ public class InterFactory
 
                 return null;
         }
+    }
+
+    //~ Inner Classes ------------------------------------------------------------------------------
+
+    //-----------//
+    // Constants //
+    //-----------//
+    private static class Constants
+            extends ConstantSet
+    {
+        private final Constant.Boolean protectMidSystemClef = new Constant.Boolean(
+                true,
+                "Should a mid-system clef claim its own ink and be kept above the weak floor?");
+
+        private final Evaluation.Grade minClefGrade = new Evaluation.Grade(
+                0.35,
+                "Minimum classifier grade for a mid-system clef to be protected");
+
+        private final Constant.Ratio minClefHeight = new Constant.Ratio(
+                2.0,
+                "Minimum clef glyph height, in interlines, to claim heads");
+
+        private final Constant.Ratio maxClefHeight = new Constant.Ratio(
+                8.0,
+                "Maximum clef glyph height, in interlines, to claim heads");
+
+        private final Constant.Ratio minClefWidth = new Constant.Ratio(
+                1.0,
+                "Minimum clef glyph width, in interlines, to claim heads");
+
+        private final Constant.Ratio maxClefWidth = new Constant.Ratio(
+                4.0,
+                "Maximum clef glyph width, in interlines, to claim heads");
+
+        private final Constant.Ratio maxLinePitchOffset = new Constant.Ratio(
+                0.5,
+                "Maximum pitch distance from a staff line for a C clef center");
     }
 }
