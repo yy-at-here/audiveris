@@ -559,7 +559,10 @@ public abstract class AbstractChordInter
                      * In the case of the beam/flag side of the mirror, strictly speaking,
                      * the note head should be considered as black.
                      */
-                    if ((noteShape == Shape.NOTEHEAD_VOID) && (note.getMirror() != null)) {
+                    if (noteShape == Shape.NOTEHEAD_VOID) {
+                        // A void head never carries a beam or a flag: either it is the mirror
+                        // case described above, or the head was mis-classified (a black head in
+                        // a dense beamed run often reads as void). Either way, sound it black.
                         dur = Shape.NOTEHEAD_BLACK.getNoteDuration();
                     }
 
