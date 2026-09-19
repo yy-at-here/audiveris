@@ -3707,9 +3707,23 @@ public class PartwiseBuilder
                     AbstractChordInter chord = wedge.getChord(side);
 
                     if ((chord != null) && (chord.getMeasure() == measure)) {
+                        final Rational timeOffset = chord.getTimeOffset();
+
+                        // A measure whose rhythm could not be resolved leaves its chords
+                        // without a time offset. Sorting such a wedge below throws, and
+                        // processMeasure answers any exception by dropping the whole
+                        // measure from the export -- so an unplaceable hairpin silently
+                        // costs every note in the bar. Drop the hairpin instead: it has no
+                        // position to be written at anyway.
+                        if (timeOffset == null) {
+                            logger.debug("No time offset for {} on {} side of {}",
+                                         chord, side, wedge);
+                            continue;
+                        }
+
                         // We take the first note of the chord as reference
                         AbstractNoteInter refNote = (AbstractNoteInter) chord.getNotes().get(0);
-                        events.add(new TimedWedge(wedge, side, refNote, chord.getTimeOffset()));
+                        events.add(new TimedWedge(wedge, side, refNote, timeOffset));
                     }
                 }
             }
