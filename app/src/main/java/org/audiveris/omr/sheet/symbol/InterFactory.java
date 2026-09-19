@@ -22,6 +22,8 @@
 package org.audiveris.omr.sheet.symbol;
 
 import org.audiveris.omr.classifier.Evaluation;
+import org.audiveris.omr.constant.Constant;
+import org.audiveris.omr.constant.ConstantSet;
 import org.audiveris.omr.glyph.Glyph;
 import org.audiveris.omr.glyph.Grades;
 import org.audiveris.omr.glyph.Shape;
@@ -36,6 +38,7 @@ import org.audiveris.omr.sheet.rhythm.MeasureStack;
 import org.audiveris.omr.sheet.time.BasicTimeColumn;
 import org.audiveris.omr.sheet.time.TimeColumn;
 import org.audiveris.omr.sig.SIGraph;
+import org.audiveris.omr.sig.inter.AbstractBeamInter;
 import org.audiveris.omr.sig.inter.AbstractChordInter;
 import org.audiveris.omr.sig.inter.AbstractFlagInter;
 import org.audiveris.omr.sig.inter.AbstractPauseInter;
@@ -125,6 +128,8 @@ public class InterFactory
 {
     //~ Static fields/initializers -----------------------------------------------------------------
 
+    private static final Constants constants = new Constants();
+
     private static final Logger logger = LoggerFactory.getLogger(InterFactory.class);
 
     //~ Instance fields ----------------------------------------------------------------------------
@@ -194,6 +199,28 @@ public class InterFactory
     }
 
     //~ Methods ------------------------------------------------------------------------------------
+
+    //--------------//
+    // overlapsBeam //
+    //--------------//
+    /**
+     * Check whether the provided glyph overlaps a beam already retrieved in this system.
+     *
+     * @param glyph the glyph to check
+     * @return true if the glyph box intersects a beam box
+     */
+    private boolean overlapsBeam (Glyph glyph)
+    {
+        final Rectangle box = glyph.getBounds();
+
+        for (Inter beam : sig.inters(AbstractBeamInter.class)) {
+            if (beam.getBounds().intersects(box)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     //--------//
     // create //
@@ -293,6 +320,18 @@ public class InterFactory
             case F_CLEF_8VB:
             case C_CLEF:
             case PERCUSSION_CLEF:
+
+                // A clef is never engraved on top of a beam. Beyond the system header, the
+                // classifier readily turns a beam group (plus a head) into an F_CLEF, which
+                // then silently transposes the rest of the part. Reject such candidates.
+                if (constants.clefRejectOnBeam.isSet() //
+                        && (glyph.getCenter2D().getX() > system.getHeaderStop()) //
+                        && overlapsBeam(glyph)) {
+                    logger.debug("Clef candidate {} discarded, overlaps a beam", glyph);
+
+                    return null;
+                }
+
                 return ClefInter.createValid(glyph, shape, grade, closestStaff); // Staff is OK
 
             // Key signatures
@@ -1200,5 +1239,17 @@ public class InterFactory
 
                 return null;
         }
+    }
+    //~ Inner Classes ------------------------------------------------------------------------------
+
+    //-----------//
+    // Constants //
+    //-----------//
+    private static class Constants
+            extends ConstantSet
+    {
+        private final Constant.Boolean clefRejectOnBeam = new Constant.Boolean(
+                true,
+                "Should a mid-system clef candidate overlapping a beam be rejected?");
     }
 }

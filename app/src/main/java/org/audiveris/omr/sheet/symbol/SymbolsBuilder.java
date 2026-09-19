@@ -32,6 +32,8 @@ import org.audiveris.omr.glyph.GlyphGroup;
 import org.audiveris.omr.glyph.GlyphLink;
 import org.audiveris.omr.glyph.Glyphs;
 import org.audiveris.omr.glyph.Grades;
+import org.audiveris.omr.glyph.Shape;
+import org.audiveris.omr.glyph.ShapeSet;
 import org.audiveris.omr.math.GeoUtil;
 import org.audiveris.omr.sheet.Scale;
 import org.audiveris.omr.sheet.Sheet;
@@ -74,6 +76,9 @@ public class SymbolsBuilder
     private static final Constants constants = new Constants();
 
     private static final Logger logger = LoggerFactory.getLogger(SymbolsBuilder.class);
+
+    /** Cue-size ratios tried when re-evaluating a glyph as a small clef. */
+    private static final double[] SMALL_CLEF_RATIOS = new double[] { 0.85, 0.78, 0.72, 0.65 };
 
     //~ Instance fields ----------------------------------------------------------------------------
 
@@ -230,6 +235,108 @@ public class SymbolsBuilder
             } catch (Exception ex) {
                 logger.warn("Error in glyph evaluation " + ex, ex);
             }
+        }
+
+        if (createdInters.isEmpty()) {
+            lookupSmallClef(glyph, closestStaff);
+        }
+    }
+
+    //-----------------//
+    // lookupSmallClef //
+    //-----------------//
+    /**
+     * Last-chance evaluation of a glyph as a cue-size (small) clef.
+     * <p>
+     * The shape classifier feeds the network with interline-normalized geometric moments
+     * (see {@link org.audiveris.omr.classifier.MixGlyphDescriptor#getFeatures}), using the
+     * <b>staff</b> interline. A clef change printed at cue size (some 65% to 85% of the
+     * full size, which is the norm for a clef change inside a system) therefore lands far
+     * from the trained cluster and gets a grade around 0.01, i.e. two orders of magnitude
+     * below {@link Grades#symbolMinGrade}, even when the glyph is perfectly clean.
+     * <p>
+     * So, for a glyph which yielded no interpretation at all, we retry the classifier with a
+     * reduced interline - the cue-size hypothesis - and accept the result only if a clef
+     * shape then comes out on top with a comfortable grade.
+     *
+     * @param glyph the glyph that yielded no interpretation
+     * @param staff the closest staff
+     */
+    private void lookupSmallClef (Glyph glyph,
+                                  Staff staff)
+    {
+        if (!constants.smallClefEnabled.isSet() || staff.isTablature()) {
+            return;
+        }
+
+        // Beyond system header only, a header clef is ClefBuilder's business
+        if (glyph.getCenter2D().getX() <= system.getHeaderStop()) {
+            return;
+        }
+
+        // The clef area center must lie within the staff height (same rule as ShapeChecker)
+        final Double pp = system.estimatedPitch(glyph.getCenter2D());
+
+        if ((pp == null) || (Math.abs(pp) >= 4)) {
+            return;
+        }
+
+        // Plausible height for a cue-size clef
+        final int interline = staff.getSpecificInterline();
+        final double normHeight = glyph.getHeight() / (double) interline;
+
+        if ((normHeight < constants.smallClefMinHeight.getValue())
+                || (normHeight > constants.smallClefMaxHeight.getValue())) {
+            return;
+        }
+
+        Shape bestShape = null;
+        double bestGrade = 0;
+        int votes = 0;
+
+        for (double ratio : SMALL_CLEF_RATIOS) {
+            final int il = (int) Math.rint(interline * ratio);
+
+            if (il < 5) {
+                continue;
+            }
+
+            // A fresh Glyph, because the interline-dependent moments are cached per glyph
+            final Glyph probe = new Glyph(glyph.getLeft(), glyph.getTop(), glyph.getRunTable());
+            final Evaluation[] evals = classifier.evaluate(probe, il, 1, 0.0, null);
+
+            if (evals.length == 0) {
+                continue;
+            }
+
+            final Evaluation eval = evals[0];
+
+            // The clef must dominate at that scale, not merely be present
+            if (!ShapeSet.Clefs.contains(eval.shape) || (eval.shape == Shape.PERCUSSION_CLEF)) {
+                continue;
+            }
+
+            votes++;
+
+            if (eval.grade > bestGrade) {
+                bestGrade = eval.grade;
+                bestShape = eval.shape;
+            }
+        }
+
+        // The verdict must be stable across the cue-size hypotheses, and confident.
+        // Time-signature digit pairs, beam groups and rests all flirt with clef shapes at one
+        // ratio or another, but only at low grades and never consistently.
+        if ((bestShape == null) //
+                || (votes < constants.smallClefMinVotes.getValue()) //
+                || (bestGrade < constants.smallClefMinGrade.getValue())) {
+            return;
+        }
+
+        final Inter created = factory.create(new Evaluation(bestShape, bestGrade), glyph, staff);
+
+        if (created != null) {
+            logger.info("Small clef {} retrieved from glyph#{}", created, glyph.getId());
         }
     }
 
@@ -422,6 +529,27 @@ public class SymbolsBuilder
         private final Scale.Fraction maxSymbolHeight = new Scale.Fraction(
                 10.0,
                 "Maximum height for a symbol (when found within staff abscissa range)");
+
+        private final Constant.Boolean smallClefEnabled = new Constant.Boolean(
+                true,
+                "Should we retry an unrecognized glyph as a cue-size clef?");
+
+        private final Constant.Ratio smallClefMinHeight = new Constant.Ratio(
+                2.0,
+                "Minimum glyph height (in interlines) for a cue-size clef candidate");
+
+        private final Constant.Ratio smallClefMaxHeight = new Constant.Ratio(
+                6.5,
+                "Maximum glyph height (in interlines) for a cue-size clef candidate");
+
+        private final Evaluation.Grade smallClefMinGrade = new Evaluation.Grade(
+                0.55,
+                "Minimum grade for a cue-size clef, evaluated at reduced interline");
+
+        private final Constant.Integer smallClefMinVotes = new Constant.Integer(
+                "ratios",
+                3,
+                "Minimum number of cue-size ratios that must elect a clef");
     }
 
     //------------//
