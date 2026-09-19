@@ -57,6 +57,7 @@ import org.audiveris.omr.sig.inter.BracketInter;
 import org.audiveris.omr.sig.inter.BreathMarkInter;
 import org.audiveris.omr.sig.inter.CaesuraInter;
 import org.audiveris.omr.sig.inter.ClefInter;
+import org.audiveris.omr.sig.inter.ClefInter.ClefKind;
 import org.audiveris.omr.sig.inter.ClutterInter;
 import org.audiveris.omr.sig.inter.CompoundNoteInter;
 import org.audiveris.omr.sig.inter.DynamicsInter;
@@ -287,29 +288,8 @@ public class InterFactory
             return;
         }
 
-        // Plausible size for a clef, from cue-size C up to full-size G
-        final int interline = staff.getSpecificInterline();
-        final double normHeight = glyph.getHeight() / (double) interline;
-        final double normWidth = glyph.getWidth() / (double) interline;
-
-        if ((normHeight < constants.minClefHeight.getValue()) //
-                || (normHeight > constants.maxClefHeight.getValue()) //
-                || (normWidth < constants.minClefWidth.getValue()) //
-                || (normWidth > constants.maxClefWidth.getValue())) {
+        if (!hasClefGeometry(clef, glyph, staff)) {
             return;
-        }
-
-        // A C clef is symmetric about its reference line, so its center must sit on a line
-        if (clef.getShape() == Shape.C_CLEF) {
-            final Double pp = system.estimatedPitch(glyph.getCenter2D());
-
-            if (pp == null) {
-                return;
-            }
-
-            if (Math.abs(pp - (2 * Math.rint(pp / 2))) > constants.maxLinePitchOffset.getValue()) {
-                return;
-            }
         }
 
         // Gather the heads wholly inside the clef.
@@ -354,6 +334,142 @@ public class InterFactory
         if ((grade != null) && (grade < Grades.minContextualGrade)) {
             logger.info("Clef {} lifted from {} to the weak-inter floor", clef, grade);
             clef.setGrade(Grades.minContextualGrade);
+        }
+    }
+
+    //-----------------//
+    // hasClefGeometry //
+    //-----------------//
+    /**
+     * Check that the glyph has the size and, for a C clef, the vertical placement of a clef.
+     * <p>
+     * The range runs from a cue-size C clef (measured: 2.75 to 2.78 interlines high, 1.89 to
+     * 1.92 wide) up to a full-size G clef (about 7 interlines high). It is a sanity envelope,
+     * not the discriminator: that role belongs to the classifier grade.
+     *
+     * @param clef  the clef candidate
+     * @param glyph its underlying glyph
+     * @param staff the related staff
+     * @return true if the glyph could be a clef of that kind at that place
+     */
+    private boolean hasClefGeometry (ClefInter clef,
+                                     Glyph glyph,
+                                     Staff staff)
+    {
+        final int interline = staff.getSpecificInterline();
+        final double normHeight = glyph.getHeight() / (double) interline;
+        final double normWidth = glyph.getWidth() / (double) interline;
+
+        if ((normHeight < constants.minClefHeight.getValue()) //
+                || (normHeight > constants.maxClefHeight.getValue()) //
+                || (normWidth < constants.minClefWidth.getValue()) //
+                || (normWidth > constants.maxClefWidth.getValue())) {
+            return false;
+        }
+
+        // A C clef is symmetric about its reference line, so its center must sit on a line
+        if (clef.getShape() == Shape.C_CLEF) {
+            final Double pp = system.estimatedPitch(glyph.getCenter2D());
+
+            if (pp == null) {
+                return false;
+            }
+
+            if (Math.abs(pp - (2 * Math.rint(pp / 2))) > constants.maxLinePitchOffset.getValue()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    //-----------------------//
+    // protectReturningClefs //
+    //-----------------------//
+    /**
+     * Second pass, once every symbol of the system has been proposed: protect the clef that
+     * <b>returns</b> a staff to the clef printed in its header.
+     * <p>
+     * Recovering a clef change without recovering the change that cancels it is worse than
+     * recovering neither: the staff then stays in the new clef until the end of the system and
+     * every note after the cancellation point is transposed. Measured on page 3 of a 600 dpi
+     * scan of a string quartet, protecting the cue tenor clef alone put 3 discrepancy rows
+     * right and 8 pitches wrong, because the bass clef printed two bars later - a cue-size
+     * F_CLEF_SMALL graded 0.2444 - stayed below the leaving threshold and was still purged.
+     * <p>
+     * The returning direction can afford a lower bar than the leaving one, because it is the
+     * safe direction: a spurious clef that merely restores what the header already says costs
+     * nothing, while a spurious clef that takes a staff away transposes it. So a candidate is
+     * lifted here when it installs exactly the {@link ClefInter.ClefKind} of the staff header,
+     * when a <b>different</b> clef is actually in force at that abscissa - a clef that has
+     * itself survived, so it is a real change and not a stray candidate - and when it passes
+     * the same geometric gates. A restoring candidate with nothing to restore is left alone:
+     * it carries no information and would only add risk.
+     */
+    public void protectReturningClefs ()
+    {
+        if (!constants.protectMidSystemClef.isSet()) {
+            return;
+        }
+
+        for (Staff staff : system.getStaves()) {
+            if (staff.isTablature()) {
+                continue;
+            }
+
+            ClefInter header = null;
+            final List<Inter> beyond = new ArrayList<>();
+
+            for (Inter inter : sig.inters(ClefInter.class)) {
+                if (inter.getStaff() != staff) {
+                    continue;
+                }
+
+                if (inter.getCenter2D().getX() <= system.getHeaderStop()) {
+                    header = (ClefInter) inter;
+                } else {
+                    beyond.add(inter);
+                }
+            }
+
+            if ((header == null) || beyond.isEmpty()) {
+                continue;
+            }
+
+            Collections.sort(beyond, Inters.byAbscissa);
+
+            final ClefKind headerKind = header.getKind();
+            ClefKind inForce = headerKind;
+
+            for (Inter inter : beyond) {
+                final ClefInter clef = (ClefInter) inter;
+                final ClefKind kind = clef.getKind();
+                final Glyph clefGlyph = clef.getGlyph();
+                Double grade = clef.getGrade();
+
+                if ((kind == null) || (grade == null) || (kind == inForce)) {
+                    continue;
+                }
+
+                if ((kind == headerKind) //
+                        && (grade < Grades.minContextualGrade) //
+                        && (grade >= Grades.intrinsicRatio * constants.minReturningClefGrade
+                                .getValue()) //
+                        && (clefGlyph != null) //
+                        && hasClefGeometry(clef, clefGlyph, staff)) {
+                    logger.info(
+                            "Returning clef {} lifted from {} to the weak-inter floor",
+                            clef,
+                            grade);
+                    clef.setGrade(Grades.minContextualGrade);
+                    grade = clef.getGrade();
+                }
+
+                // Only a clef that will survive the weak purge actually changes what is in force
+                if (grade >= Grades.minContextualGrade) {
+                    inForce = kind;
+                }
+            }
         }
     }
 
@@ -1451,6 +1567,10 @@ public class InterFactory
         private final Evaluation.Grade minClefGrade = new Evaluation.Grade(
                 0.35,
                 "Minimum classifier grade for a mid-system clef to be protected");
+
+        private final Evaluation.Grade minReturningClefGrade = new Evaluation.Grade(
+                0.20,
+                "Minimum classifier grade for a clef that returns a staff to its header clef");
 
         private final Constant.Ratio minClefHeight = new Constant.Ratio(
                 2.0,
