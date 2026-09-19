@@ -433,6 +433,19 @@ public class AugmentationDotInter
 
                     if (xGap > 0) {
                         double yGap = Math.abs(refPt.y - dotCenter.y);
+
+                        // An augmentation dot always lies within a staff space: the head's own
+                        // space when the head is in a space (odd pitch), an adjacent space when
+                        // the head is on a line (even pitch). Reject dots whose vertical offset
+                        // is not compatible with the head staff position -- typically staccato
+                        // dots of a neighbouring note, or ink left over by a touching head.
+                        final double expectedDy = ((head.getIntegerPitch() % 2) != 0) ? 0.0 : 0.5;
+                        final double maxDev = AugmentationRelation.getMaxDyDeviation().getValue();
+
+                        if (Math.abs(scale.pixelsToFrac(yGap) - expectedDy) > maxDev) {
+                            continue;
+                        }
+
                         AugmentationRelation rel = new AugmentationRelation();
                         rel.setOutGaps(scale.pixelsToFrac(xGap), scale.pixelsToFrac(yGap), profile);
 
