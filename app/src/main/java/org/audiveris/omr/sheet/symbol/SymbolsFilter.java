@@ -47,6 +47,7 @@ import org.audiveris.omr.sheet.ui.PixelBoard;
 import org.audiveris.omr.sheet.ui.ScrollImageView;
 import org.audiveris.omr.sig.SIGraph;
 import org.audiveris.omr.sig.inter.AbstractBeamInter;
+import org.audiveris.omr.sig.inter.AbstractChordInter;
 import org.audiveris.omr.sig.inter.HeadInter;
 import org.audiveris.omr.sig.inter.Inter;
 import org.audiveris.omr.sig.inter.LyricItemInter;
@@ -232,6 +233,10 @@ public class SymbolsFilter
                 3,
                 "Maximum number of chars for a word to be checked as a symbol");
 
+        private final Constant.Ratio minHeadGrade = new Constant.Ratio(
+                0.4,
+                "Minimum intrinsic grade to hide a head");
+
         private final Constant.Ratio minHeadContextualGrade = new Constant.Ratio(
                 0.6,
                 "Minimum contextual grade to hide a head");
@@ -302,7 +307,12 @@ public class SymbolsFilter
             }
 
             if (inter instanceof HeadInter) {
-                return ctxGrade >= constants.minHeadContextualGrade.getValue();
+                // A head whose own template match is poor may well be some other symbol
+                // (typically an accidental or a time signature) that happens to sit next to a
+                // stem.  Its contextual grade is inflated by that stem, so gate on the
+                // intrinsic grade as well: a poor match keeps its ink available to SYMBOLS.
+                return (inter.getGrade() >= constants.minHeadGrade.getValue()) //
+                        && (ctxGrade >= constants.minHeadContextualGrade.getValue());
             }
 
             return super.canHide(inter);
@@ -465,6 +475,26 @@ public class SymbolsFilter
                     GlyphGroup.SYMBOL);
 
             systemWeaks.addAll(glyphs);
+        }
+
+        //-------//
+        // visit //
+        //-------//
+        @Override
+        public void visit (AbstractChordInter chord)
+        {
+            // Erase only the notes we can safely hide.  A poorly matched head inside a
+            // well-graded chord keeps its ink in the symbols image, so that the SYMBOLS
+            // classifier can propose what the ink really is (typically an accidental or a
+            // time signature) and SigReducer.detectOverlaps() can arbitrate between the two.
+            // Saving the pixels as "optional" glyphs is not enough here: the erasure is bounded
+            // by the head template box, which carves a hole out of the middle of a tall
+            // accidental and leaves fragments the classifier cannot reassemble.
+            for (Inter note : chord.getNotes()) {
+                if (canHide(note)) {
+                    note.accept(this);
+                }
+            }
         }
 
         //-------//
