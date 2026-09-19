@@ -21,13 +21,17 @@
 // </editor-fold>
 package org.audiveris.omr.sheet.rhythm;
 
+import org.audiveris.omr.constant.Constant;
+import org.audiveris.omr.constant.ConstantSet;
 import org.audiveris.omr.glyph.Shape;
 import org.audiveris.omr.math.GeoUtil;
 import org.audiveris.omr.math.Rational;
+import org.audiveris.omr.sheet.Scale;
 import org.audiveris.omr.sheet.Staff;
 import org.audiveris.omr.sig.SIGraph;
 import org.audiveris.omr.sig.inter.AbstractBeamInter;
 import org.audiveris.omr.sig.inter.AbstractChordInter;
+import org.audiveris.omr.sig.inter.BeamGroupInter;
 import org.audiveris.omr.sig.inter.Inters;
 import org.audiveris.omr.sig.inter.StemInter;
 import org.audiveris.omr.sig.inter.TupletInter;
@@ -59,6 +63,8 @@ import java.util.TreeSet;
 public class TupletsBuilder
 {
     //~ Static fields/initializers -----------------------------------------------------------------
+
+    private static final Constants constants = new Constants();
 
     private static final Logger logger = LoggerFactory.getLogger(TupletsBuilder.class);
 
@@ -278,6 +284,10 @@ public class TupletsBuilder
     {
         logger.trace("{} getEmbracedChords", tuplet);
 
+        // Keep the unfiltered list: filterChordsOnAbscissa() may drop a genuine member of the
+        // group in favour of a competing (often spurious) chord at the same abscissa.
+        final List<AbstractChordInter> allCandidates = new ArrayList<>(candidates);
+
         filterChordsOnAbscissa(tuplet, candidates);
 
         // We consider each candidate in turn, with its duration
@@ -303,7 +313,7 @@ public class TupletsBuilder
             if (collector.isNotOk()) {
                 logger.debug("{} {}", tuplet, collector.getStatusMessage());
 
-                return null;
+                return lenientChords(tuplet, allCandidates, targetStaff);
             } else if (collector.isOk()) {
                 if (logger.isDebugEnabled()) {
                     collector.dump();
@@ -316,7 +326,183 @@ public class TupletsBuilder
         // Candidates are exhausted, we lack chords
         logger.debug("{} {}", tuplet, collector.getStatusMessage());
 
+        return lenientChords(tuplet, allCandidates, targetStaff);
+    }
+
+    //---------------//
+    // lenientChords //
+    //---------------//
+    /**
+     * Fallback used when the strict duration-based retrieval has failed.
+     * <p>
+     * The strict collector requires the embraced chords to sum up to
+     * <i>exactly</i> base * expectedCount, which a single mis-read duration
+     * (spurious augmentation dot, missed beam, wrong head) is enough to defeat.
+     * Here we rely on the printed grouping instead:
+     * <ol>
+     * <li>the beam group of the chord closest to the sign, if it holds exactly the
+     * expected number of chords and its abscissa range brackets the sign,
+     * <li>otherwise the window of expectedCount consecutive chords (on the target staff)
+     * whose abscissa range brackets the sign and whose middle is closest to it.
+     * </ol>
+     *
+     * @param tuplet      the tuplet sign
+     * @param candidates  chord candidates (unfiltered), ordered by euclidean distance to sign
+     * @param targetStaff the staff retained for this sign
+     * @return the embraced chords, or null
+     */
+    private static SortedSet<AbstractChordInter> lenientChords (
+            TupletInter tuplet,
+            List<AbstractChordInter> candidates,
+            Staff targetStaff)
+    {
+        if (!constants.lenientLinking.isSet() || (targetStaff == null)) {
+            return null;
+        }
+
+        // A weak sign is more likely to be noise (fingering, dirt, a mis-read symbol) than a
+        // real tuplet: for those, keep the strict behaviour (i.e. drop the sign).
+        if (tuplet.getGrade() < constants.lenientMinGrade.getValue()) {
+            logger.debug("{} too weak for lenient linking", tuplet);
+
+            return null;
+        }
+
+        // A tuplet digit is a text-height glyph. A blob much shorter than an interline is ink
+        // noise (a staff-line fragment between beams, a dot, ...) whatever the classifier says.
+        final Rectangle signBox = tuplet.getBounds();
+        final Scale scale = tuplet.getSig().getSystem().getSheet().getScale();
+
+        if ((signBox == null) || (signBox.height < scale.toPixels(constants.minSignHeight))) {
+            logger.debug("{} too small for lenient linking", tuplet);
+
+            return null;
+        }
+
+        final int count = expectedCount(tuplet.getShape());
+
+        if (count == 0) {
+            return null;
+        }
+
+        final int signX = tuplet.getCenter().x;
+
+        // Chords of the target staff, ordered by abscissa
+        final List<AbstractChordInter> staffChords = new ArrayList<>();
+
+        for (AbstractChordInter ch : candidates) {
+            if (ch.getTopStaff() == targetStaff) {
+                staffChords.add(ch);
+            }
+        }
+
+        Collections.sort(staffChords, Inters.byFullAbscissa);
+
+        // At a given abscissa a rest and a head cannot both be sounding in the same voice:
+        // when they overlap, the head is the real event and the rest is a mis-read symbol
+        // (very often the tuplet sign itself, read as a rest).
+        for (int i = 0; i < staffChords.size(); i++) {
+            final AbstractChordInter ch = staffChords.get(i);
+
+            if (!ch.isRest()) {
+                continue;
+            }
+
+            for (AbstractChordInter other : staffChords) {
+                if ((other != ch) && !other.isRest() && (GeoUtil.xOverlap(
+                        ch.getBounds(),
+                        other.getBounds()) > 0)) {
+                    staffChords.remove(i--);
+
+                    break;
+                }
+            }
+        }
+
+        // 1/ Beam group of the chord closest to the sign
+        for (AbstractChordInter ch : candidates) {
+            if (ch.getTopStaff() != targetStaff) {
+                continue;
+            }
+
+            final BeamGroupInter bg = ch.getBeamGroup();
+
+            if (bg != null) {
+                final List<AbstractChordInter> group = new ArrayList<>();
+
+                for (AbstractChordInter g : bg.getChords()) {
+                    if (staffChords.contains(g)) {
+                        group.add(g);
+                    }
+                }
+
+                Collections.sort(group, Inters.byFullAbscissa);
+
+                if ((group.size() == count) && brackets(signX, group)) {
+                    logger.debug("{} lenient beam-group link to {}", tuplet, Inters.ids(group));
+
+                    final SortedSet<AbstractChordInter> set = new TreeSet<>(Inters.byFullAbscissa);
+                    set.addAll(group);
+
+                    return set;
+                }
+            }
+
+            break; // Only the closest chord is considered for this rule
+        }
+
+        // 2/ Window of expectedCount consecutive chords bracketing the sign
+        List<AbstractChordInter> best = null;
+        int bestDist = Integer.MAX_VALUE;
+
+        for (int i = 0; (i + count) <= staffChords.size(); i++) {
+            final List<AbstractChordInter> win = staffChords.subList(i, i + count);
+
+            if (brackets(signX, win)) {
+                final int mid = (win.get(0).getTailLocation().x + win.get(count - 1)
+                        .getTailLocation().x) / 2;
+                final int dist = Math.abs(mid - signX);
+
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = new ArrayList<>(win);
+                }
+            }
+        }
+
+        if (best != null) {
+            logger.debug("{} lenient window link to {}", tuplet, Inters.ids(best));
+
+            final SortedSet<AbstractChordInter> set = new TreeSet<>(Inters.byFullAbscissa);
+            set.addAll(best);
+
+            return set;
+        }
+
         return null;
+    }
+
+    //----------//
+    // brackets //
+    //----------//
+    /**
+     * Check that the sign abscissa lies between the tails of the first and last chords.
+     *
+     * @param signX abscissa of the tuplet sign
+     * @param group the abscissa-ordered chords
+     * @return true if the sign is bracketed by the group
+     */
+    private static boolean brackets (int signX,
+                                     List<AbstractChordInter> group)
+    {
+        if (group.isEmpty()) {
+            return false;
+        }
+
+        final int x1 = group.get(0).getTailLocation().x;
+        final int x2 = group.get(group.size() - 1).getTailLocation().x;
+
+        return (signX >= Math.min(x1, x2)) && (signX <= Math.max(x1, x2));
     }
 
     //----------------//
@@ -565,5 +751,24 @@ public class TupletsBuilder
             TOO_MANY,
             OUTSIDE;
         }
+    }
+
+    //-----------//
+    // Constants //
+    //-----------//
+    private static class Constants
+            extends ConstantSet
+    {
+        private final Constant.Boolean lenientLinking = new Constant.Boolean(
+                true,
+                "Should a tuplet sign fall back to printed grouping when durations do not add up?");
+
+        private final Constant.Ratio lenientMinGrade = new Constant.Ratio(
+                0.40,
+                "Minimum tuplet grade for the lenient (printed-grouping) fallback");
+
+        private final Scale.Fraction minSignHeight = new Scale.Fraction(
+                1.0,
+                "Minimum height of a tuplet sign eligible for the lenient fallback");
     }
 }
