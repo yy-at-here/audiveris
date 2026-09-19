@@ -208,6 +208,25 @@ public class AugmentationRelation
         return constants.restHeightRatio;
     }
 
+    //-------------------//
+    // getMaxDyDeviation //
+    //-------------------//
+    /**
+     * Report the maximum tolerated deviation between the actual dot-to-head vertical gap
+     * and the gap implied by the head staff position.
+     * <p>
+     * An augmentation dot is always engraved inside a staff space: the very space of the head
+     * when the head sits in a space (odd pitch), or an adjacent space when the head sits on a
+     * line (even pitch). This is what tells it apart from a staccato dot of a neighbouring
+     * note, or from ink left over by a touching head.
+     *
+     * @return max dy deviation, in interline fraction
+     */
+    public static Scale.Fraction getMaxDyDeviation ()
+    {
+        return constants.maxDyDeviation;
+    }
+
     //~ Inner Classes ------------------------------------------------------------------------------
 
     //-----------//
@@ -221,11 +240,15 @@ public class AugmentationRelation
                 "Supporting coeff for (source) dot");
 
         private final Scale.Fraction xOutGapMax = new Scale.Fraction(
-                2.0,
+                1.0,
                 "Maximum horizontal gap between dot center & note/rest reference point");
 
         @SuppressWarnings("unused")
-        private final Scale.Fraction xOutGapMax_p1 = new Scale.Fraction(2.0, "Idem for profile 1");
+        private final Scale.Fraction xOutGapMax_p1 = new Scale.Fraction(1.0, "Idem for profile 1");
+
+        private final Scale.Fraction maxDyDeviation = new Scale.Fraction(
+                0.3,
+                "Maximum deviation between actual dot dy and the dy implied by head pitch");
 
         private final Scale.Fraction xOutGapMin = new Scale.Fraction(
                 0.25,
