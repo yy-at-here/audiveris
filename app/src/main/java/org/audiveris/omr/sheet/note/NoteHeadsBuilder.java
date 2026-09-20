@@ -1262,7 +1262,11 @@ public class NoteHeadsBuilder
                 "Vertical margin for intercepting stem seed around a target pitch");
 
         private final Constant.Ratio stemLessBoost = new Constant.Ratio(
-                0, // Was 0.38,
+                // Restored to the pre-5.11.0 value. It was zeroed because a relaxed stem-less
+                // head can also match stray round ink; SymbolsFilter now keeps the ink of a
+                // poorly matched head, so such a false head no longer destroys the symbol it
+                // covers and loses the arbitration at SYMBOLS time.
+                0.38, // Was 0 in 5.11.0,
                 "How much do we boost stem-less heads (always isolated)");
 
         private final Constant.Ratio crossBoost = new Constant.Ratio(
