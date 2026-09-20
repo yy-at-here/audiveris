@@ -172,6 +172,12 @@ public class SymbolsBuilder
         watch.start("processClusters");
         processClusters(systemGraph);
 
+        // Now that every clef candidate of the system exists, protect the ones that return a
+        // staff to the clef of its header: a clef change that is never cancelled is worse than
+        // no clef change at all.
+        watch.start("protectReturningClefs");
+        factory.protectReturningClefs();
+
         if (constants.printWatch.isSet()) {
             watch.print();
         }
