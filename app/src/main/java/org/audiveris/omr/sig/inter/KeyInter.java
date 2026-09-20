@@ -69,6 +69,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1094,6 +1095,7 @@ public class KeyInter
     public static void lookupCandidates (SystemInfo system)
     {
         final double maxPitchDiff = constants.maxPitchDiff.getValue();
+        final List<KeyProposal> proposals = new ArrayList<>();
 
         // Only AlterInter instances with shape SHARP, FLAT or NATURAL
         // No DOUBLE_SHARP or DOUBLE_FLAT
@@ -1135,13 +1137,73 @@ public class KeyInter
                         staffAlters.subList(i, staffAlters.size()));
 
                 if (keyConfig != null) {
-                    final List<AlterInter> members = staffAlters.subList(
-                            i,
-                            i + Math.abs(keyConfig.fifths));
-                    buildKey(keyConfig, members);
+                    final List<AlterInter> members = new ArrayList<>(
+                            staffAlters.subList(i, i + Math.abs(keyConfig.fifths)));
+                    proposals.add(new KeyProposal(staff, keyConfig, members));
                     i += members.size() - 1;
                 }
             }
+        }
+
+        // A key signature change is a system-wide event: it is printed on every staff of the
+        // system at the very same abscissa. A lone candidate, found on a single staff, is far
+        // more often an accidental, a clef change or a time signature misread as an alter.
+        // So, when the system holds several staves, require abscissa-aligned support from at
+        // least one other staff. See #keyColumnSupport.
+        if (constants.keyColumnSupport.isSet() && (system.getStaves().size() > 1)) {
+            final double maxDx = system.getSheet().getScale().toPixels(constants.maxColumnDx);
+
+            for (Iterator<KeyProposal> it = proposals.iterator(); it.hasNext();) {
+                final KeyProposal p = it.next();
+                boolean supported = false;
+
+                for (KeyProposal q : proposals) {
+                    if ((q.staff != p.staff) && (Math.abs(q.getX() - p.getX()) <= maxDx)) {
+                        supported = true;
+                        break;
+                    }
+                }
+
+                if (!supported) {
+                    logger.info(
+                            "Discarding unsupported key candidate {} on staff#{} at x:{}",
+                            p.config,
+                            p.staff.getId(),
+                            p.getX());
+                    it.remove();
+                }
+            }
+        }
+
+        proposals.forEach(p -> buildKey(p.config, p.members));
+    }
+
+    //-------------//
+    // KeyProposal //
+    //-------------//
+    /**
+     * A key signature candidate, pending cross-staff corroboration.
+     */
+    private static class KeyProposal
+    {
+        final Staff staff;
+
+        final KeyConfig config;
+
+        final List<AlterInter> members;
+
+        KeyProposal (Staff staff,
+                     KeyConfig config,
+                     List<AlterInter> members)
+        {
+            this.staff = staff;
+            this.config = config;
+            this.members = members;
+        }
+
+        int getX ()
+        {
+            return members.get(0).getBounds().x;
         }
     }
 
@@ -1431,6 +1493,14 @@ public class KeyInter
         private final Constant.Ratio minOverlapIou = new Constant.Ratio(
                 0.4,
                 "Minimum IOU to detect overlap between Alter candidates");
+
+        private final Constant.Boolean keyColumnSupport = new Constant.Boolean(
+                true,
+                "Should a mid-system key require abscissa support from another staff?");
+
+        private final Fraction maxColumnDx = new Fraction(
+                4.0,
+                "Maximum abscissa shift between the staves of a mid-system key column");
     }
 
     //-----------//
